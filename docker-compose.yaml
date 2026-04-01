@@ -1,0 +1,28 @@
+services:
+  redis_cache:
+    image: redis:alpine
+    container_name: redis_cache
+    ports:
+      - "6379:6379"
+    restart: always
+
+  api_financeira:
+    build: .
+    container_name: api_financeira
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis_cache
+    # Carrega as variáveis do arquivo .env
+    env_file:
+      - .env
+    # Volume opcional para desenvolvimento (faz o código atualizar no docker ao salvar no PC)
+    volumes:
+      - .:/app
+    environment:
+      - REDIS_URL=redis://redis_cache:6379
+    restart: on-failure
+
+networks:
+  default:
+    name: rede_financeira

@@ -1,0 +1,20 @@
+[project]
+name = "api-financeira"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "httpx",
+    "passlib[bcrypt]==1.7.4",
+    "bcrypt==4.0.1",
+    "psycopg2-binary>=2.9.11",
+    "pydantic[email]",
+    "pyjwt",
+    "python-dotenv>=1.2.1",
+    "python-multipart>=0.0.22",
+    "redis",
+    "sqlalchemy>=2.0.47",
+    "uvicorn",
+    "yfinance",
+]
