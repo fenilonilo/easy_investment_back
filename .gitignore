@@ -33,3 +33,9 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Obsidian vault
+.obsidian/
+
+# Saida gerada pelo /graphify
+graphify-out/

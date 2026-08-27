@@ -6,13 +6,38 @@ services:
       - "6379:6379"
     restart: always
 
+  # Postgres dedicado ao subsistema de IA (Agno): sessões de chat, resumos e
+  # vetores do knowledge base. A imagem pgvector já traz a extensão `vector`.
+  # O banco easy_finace (host, porta 5432) não é tocado.
+  postgres_ai:
+    image: pgvector/pgvector:pg17
+    container_name: postgres_ai
+    environment:
+      POSTGRES_USER: agno
+      POSTGRES_PASSWORD: agno
+      POSTGRES_DB: agno_ai
+    ports:
+      # 5433 no host porque a 5432 já é do easy_finace
+      - "5433:5432"
+    volumes:
+      - pgdata_ai:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agno -d agno_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
+
   api_financeira:
     build: .
     container_name: api_financeira
     ports:
       - "8000:8000"
     depends_on:
-      - redis_cache
+      redis_cache:
+        condition: service_started
+      postgres_ai:
+        condition: service_healthy
     # Carrega as variáveis do arquivo .env
     env_file:
       - .env
@@ -21,7 +46,11 @@ services:
       - .:/app
     environment:
       - REDIS_URL=redis://redis_cache:6379
+      - AI_DATABASE_URL=postgresql+psycopg://agno:agno@postgres_ai:5432/agno_ai
     restart: on-failure
+
+volumes:
+  pgdata_ai:
 
 networks:
   default:

@@ -17,4 +17,24 @@ dependencies = [
     "sqlalchemy>=2.0.47",
     "uvicorn",
     "yfinance",
+    "agno>=2.9.0",
+    "google-genai>=2.18.1",
+    "groq>=1.6.0",
+    "psycopg[binary]>=3.3.4",
+    "pgvector>=0.5.0",
+    "pypdf>=6.16.0",
+    "beautifulsoup4>=4.14.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: precisa de API keys reais e do postgres_ai no ar (desmarcado por padrão)",
 ]
