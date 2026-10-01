@@ -1,11 +1,13 @@
 import json
 from fastapi import APIRouter, Depends
-from typing import List, Optional
+from typing import List, Literal, Optional
 from models.asset import AssetQuote, HistoryPoint, Dividend, Financials, NewsItem, Asset
 from core.security import get_current_user
 from services.asset_service import AssetService
 from infrastructure.cache import RedisCache
 from infrastructure.providers import YahooFinanceProvider
+
+Period = Literal["1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"]
 
 router = APIRouter(prefix="/assets", tags=["Assets"], dependencies=[Depends(get_current_user)])
 
@@ -32,7 +34,7 @@ async def get_asset(
     return await service.get_asset_quote(ticker)
 
 @router.get("/{ticker}/history", response_model=List[HistoryPoint])
-async def get_asset_history(ticker: str, period: str = "1mo", service: AssetService = Depends(get_asset_service)):
+async def get_asset_history(ticker: str, period: Period = "1mo", service: AssetService = Depends(get_asset_service)):
     data = await service.get_history(ticker, period)
     return json.loads(data)
 

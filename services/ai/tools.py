@@ -1,8 +1,9 @@
 """Tools do agente sobre os dados da própria API.
 
-Complementam o `YFinanceTools` com duas coisas que só existem aqui: os dados já
-cacheados no Redis pelo `AssetService` (mesma resposta que os endpoints REST
-devolvem) e a watchlist do usuário.
+Dados já cacheados no Redis pelo `AssetService` (mesma resposta que os
+endpoints REST devolvem) e a watchlist do usuário. O `YFinanceTools` do Agno
+não é usado: devolve o `info` inteiro do Yahoo (~10k caracteres por ticker) e
+estourava o TPM da Groq no fallback.
 
 Todas as tools de banco abrem a própria sessão via `SessionLocal`. Usar a
 sessão do request não serviria: uma tool pode ser executada de dentro do

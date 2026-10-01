@@ -6,6 +6,23 @@ from models.asset import Asset, AssetQuote, HistoryPoint, Dividend, Financials, 
 from typing import List, Optional
 
 
+_CRYPTO = ["BTC", "ETH", "SOL", "USDC", "USDT"]
+
+
+def format_ticker(ticker: str) -> str:
+    """B3 (5+ chars terminando em dígito) -> .SA; cripto conhecida -> -USD. Idempotente."""
+    ticker = ticker.strip().upper()
+    if len(ticker) >= 5 and ticker[-1].isdigit():
+        return f"{ticker}.SA"
+    elif ticker in _CRYPTO:
+        return f"{ticker}-USD"
+    return ticker
+
+
+def _has_price(info) -> bool:
+    return bool(info) and 'regularMarketPrice' in info
+
+
 class IAssetProvider(ABC):
     @abstractmethod
     async def get_quote(self, ticker: str) -> AssetQuote: pass
@@ -32,12 +49,14 @@ class YahooFinanceProvider(IAssetProvider):
     """
 
     def _format_ticker(self, ticker: str) -> str:
-        ticker = ticker.upper()
-        if len(ticker) >= 5 and ticker[-1].isdigit():
-            return f"{ticker}.SA"
-        elif ticker in ["BTC", "ETH", "SOL", "USDC", "USDT"]:
-            return f"{ticker}-USD"
-        return ticker
+        return format_ticker(ticker)
+
+    async def _ensure_exists(self, stock, ticker: str):
+        """Resultado vazio é ambíguo (ticker inválido x sem dados): confirma pelo info."""
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(None, lambda: stock.info)
+        if not _has_price(info):
+            raise ValueError(f"Ativo {ticker} não encontrado")
 
     async def _get_ticker_object(self, ticker: str):
         search_ticker = self._format_ticker(ticker)
@@ -49,7 +68,7 @@ class YahooFinanceProvider(IAssetProvider):
         loop = asyncio.get_event_loop()
         info = await loop.run_in_executor(None, lambda: stock.info)
 
-        if not info or 'regularMarketPrice' not in info:
+        if not _has_price(info):
             raise ValueError(f"Ativo {ticker} não encontrado")
 
         price = info.get('regularMarketPrice') or info.get('previousClose', 0)
@@ -66,6 +85,7 @@ class YahooFinanceProvider(IAssetProvider):
             name=info.get('shortName') or info.get('longName') or ticker,
             icon_url=icon_url or "",
             price_usd=float(price),
+            currency=info.get('currency'),
             direction="subindo" if change > 0 else "caindo" if change < 0 else "estável"
         )
 
@@ -94,18 +114,26 @@ class YahooFinanceProvider(IAssetProvider):
         stock = await self._get_ticker_object(ticker)
         loop = asyncio.get_event_loop()
         df = await loop.run_in_executor(None, lambda: stock.history(period=period, interval=interval))
-        return [HistoryPoint(date=str(index.date()), close=row['Close']) for index, row in df.iterrows()]
+        if df.empty:
+            await self._ensure_exists(stock, ticker)
+        intraday = interval.endswith(("m", "h"))
+        return [HistoryPoint(date=index.isoformat() if intraday else str(index.date()), close=row['Close'])
+                for index, row in df.iterrows()]
 
     async def get_dividends(self, ticker: str) -> List[Dividend]:
         stock = await self._get_ticker_object(ticker)
         loop = asyncio.get_event_loop()
         divs = await loop.run_in_executor(None, lambda: stock.dividends)
+        if divs.empty:
+            await self._ensure_exists(stock, ticker)
         return [Dividend(date=str(index.date()), amount=float(value)) for index, value in divs.tail(10).items()]
 
     async def get_financials(self, ticker: str) -> Financials:
         stock = await self._get_ticker_object(ticker)
         loop = asyncio.get_event_loop()
         info = await loop.run_in_executor(None, lambda: stock.info)
+        if not _has_price(info):
+            raise ValueError(f"Ativo {ticker} não encontrado")
         return Financials(
             market_cap=info.get("marketCap"),
             pe_ratio=info.get("trailingPE"),
@@ -120,6 +148,7 @@ class YahooFinanceProvider(IAssetProvider):
         news = await loop.run_in_executor(None, lambda: stock.news)
 
         if not news:
+            await self._ensure_exists(stock, ticker)
             return []
 
         news_list = []

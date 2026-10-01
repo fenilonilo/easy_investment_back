@@ -4,11 +4,11 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 WORKDIR /app
 
 # 1. Copiamos APENAS os arquivos de configuração primeiro
-COPY pyproject.toml uv.lock* ./
+COPY pyproject.toml uv.lock ./
 
-# 2. Instalamos as dependências baseadas no pyproject.toml
+# 2. Instalamos EXATAMENTE as versões travadas no uv.lock (sem dev)
 # O comando '--system' instala no Python do container
-RUN uv pip install --system --no-cache -r pyproject.toml
+RUN uv export --frozen --no-dev --no-hashes --no-emit-project | uv pip install --system --no-cache -r -
 
 # 3. Agora copiamos o resto do código (api, services, etc)
 # Como as dependências já foram instaladas na camada acima,

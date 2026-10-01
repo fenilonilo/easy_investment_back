@@ -21,7 +21,6 @@ def login_for_access_token(
 ):
     # O OAuth2PasswordRequestForm espera 'username' (e-mail) e 'password'
     user = db.query(User).filter(User.email == form_data.username).first()
-    print(user)
 
     if not user or not verify_password(form_data.password, user.password_hash):
         raise HTTPException(
@@ -30,6 +29,11 @@ def login_for_access_token(
         )
 
     access_token = create_access_token(data={"sub": str(user.id)})
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        # O app persiste isto para preencher o Perfil; sem GET /me é o único caminho.
+        "user": UserResponse.model_validate(user),
+    }
 
 
