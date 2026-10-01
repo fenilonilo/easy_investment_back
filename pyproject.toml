@@ -14,7 +14,7 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "python-multipart>=0.0.22",
     "redis",
-    "sqlalchemy>=2.0.47",
+    "sqlalchemy[asyncio]>=2.0.47",
     "uvicorn",
     "yfinance",
     "agno>=2.9.0",

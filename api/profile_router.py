@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from typing import List
 from sqlalchemy.orm import Session
 from core.security import get_current_user
@@ -5,20 +7,45 @@ from infrastructure.database import get_db
 from models.asset import Asset, AssetRemove
 from models.user import User, UserWatchlist
 from sqlalchemy.orm.attributes import flag_modified
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
+from api.asset_router import get_asset_service
+from services.asset_service import AssetService
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/profile", tags=["Profile"], dependencies=[Depends(get_current_user)])
 
 
+async def validated_assets(
+        assets: List[Asset] = Body(..., min_length=1),
+        service: AssetService = Depends(get_asset_service),
+) -> List[Asset]:
+    """Rejeita (422) tickers que o provider diz DEFINITIVAMENTE não existirem.
+    Falha do provider/timeout: aceita (fail open) e loga warning."""
+    tickers = list({a.ticker for a in assets})
+    results = await asyncio.gather(*(service.get_asset_quote(t) for t in tickers), return_exceptions=True)
+    invalid = []
+    for ticker, res in zip(tickers, results):
+        if isinstance(res, HTTPException) and res.status_code == 404:
+            invalid.append(ticker)
+        elif isinstance(res, BaseException):
+            logger.warning("Validação de ticker %s ignorada (provider indisponível): %s", ticker, type(res).__name__)
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Ticker(s) não encontrado(s): {', '.join(sorted(invalid))}",
+        )
+    return assets
+
+
 @router.post("/watchlist/add", status_code=status.HTTP_200_OK)
 def add_to_watchlist(
-        assets: List[Asset],  # Agora aceita uma lista de Assets
+        assets: List[Asset] = Depends(validated_assets),
         db: Session = Depends(get_db),
         current_user: User = Depends(get_current_user)
 ):
     # 1. Busca a watchlist do usuário
-    watchlist = db.query(UserWatchlist).filter(UserWatchlist.user_id == current_user.id).first()
+    watchlist = db.query(UserWatchlist).filter(UserWatchlist.user_id == current_user.id).with_for_update().first()
 
     # Converte os objetos Pydantic para dicionários
     new_assets_dicts = [a.dict() for a in assets]
@@ -62,7 +89,7 @@ def remove_from_watchlist(
         current_user: User = Depends(get_current_user)
 ):
     # 1. Busca a watchlist do usuário
-    watchlist = db.query(UserWatchlist).filter(UserWatchlist.user_id == current_user.id).first()
+    watchlist = db.query(UserWatchlist).filter(UserWatchlist.user_id == current_user.id).with_for_update().first()
 
     if not watchlist or not watchlist.tickers:
         raise HTTPException(

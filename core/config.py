@@ -36,6 +36,9 @@ GEMINI_EMBEDDER_ID = os.getenv("GEMINI_EMBEDDER_ID", "gemini-embedding-001")
 GEMINI_EMBEDDER_DIMENSIONS = int(os.getenv("GEMINI_EMBEDDER_DIMENSIONS", 1536))
 
 AI_HISTORY_RUNS = int(os.getenv("AI_HISTORY_RUNS", 5))
+# Trechos devolvidos por busca na knowledge base. O default do Agno (10) gera
+# ~11k tokens, mais que o TPM do free tier da Groq (8000) e quebra o fallback.
+AI_KNOWLEDGE_MAX_RESULTS = int(os.getenv("AI_KNOWLEDGE_MAX_RESULTS", 3))
 AI_FALLBACK_COOLDOWN_SECONDS = int(os.getenv("AI_FALLBACK_COOLDOWN_SECONDS", 300))
 
 # Nomes das tabelas/schema que o Agno cria no AI_DATABASE_URL.

@@ -81,7 +81,9 @@ async def chat(
     except AgentUnavailable as exc:
         # O traceback completo já foi logado no chat_service; aqui só ligamos
         # a resposta do app ao request_id que localiza aquele traceback.
-        logger.error("Agente indisponível para user=%s | %s", user_ctx.user_id, exc)
+        logger.error(
+            "Agente indisponível para user=%s | %s", user_ctx.user_id, exc.raw
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=(

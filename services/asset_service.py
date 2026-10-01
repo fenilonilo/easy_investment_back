@@ -6,7 +6,7 @@ from typing import List, Optional
 from models.asset import Asset, AssetQuote
 from infrastructure.cache import ICacheProvider
 from fastapi.concurrency import run_in_threadpool
-from infrastructure.providers import IAssetProvider
+from infrastructure.providers import IAssetProvider, format_ticker
 
 
 class AssetService:
@@ -15,7 +15,7 @@ class AssetService:
         self.cache = cache
 
     async def get_asset_quote(self, ticker: str) -> AssetQuote:
-        ticker_upper = ticker.upper()
+        ticker_upper = format_ticker(ticker)
         cache_key = f"quote_{ticker_upper}"
 
         # 1. Tenta buscar no Redis
@@ -117,31 +117,40 @@ class AssetService:
         if cached:
             return cached  # Retorna string JSON para o router parsear ou pydantic usar
 
-        data = await fetch_func()
+        try:
+            data = await fetch_func()
+        except ValueError as e:  # ticker inexistente: 404, nada vai pro cache
+            raise HTTPException(status_code=404, detail=str(e))
         # Se for uma lista de objetos Pydantic, converte para JSON
         json_data = json.dumps([i.dict() for i in data]) if isinstance(data, list) else data.json()
         await self.cache.set(key, json_data, ttl=ttl)
         return json_data
 
     async def get_history(self, ticker: str, period: str):
+        ticker = format_ticker(ticker)
+        # 1d -> candles de 5m (senão o gráfico tem 1 ponto); cache curto no intraday
+        interval, ttl = ("5m", 60) if period == "1d" else ("1d", 3600)
         return await self._get_with_cache(
-            f"hist_{ticker}_{period}", 3600,  # Cache 1 hora
-            lambda: self.provider.get_history(ticker, period, "1d")
+            f"hist_{ticker}_{period}", ttl,
+            lambda: self.provider.get_history(ticker, period, interval)
         )
 
     async def get_financial_summary(self, ticker: str):
+        ticker = format_ticker(ticker)
         return await self._get_with_cache(
             f"fin_{ticker}", 86400,  # Cache 24 horas (balanços mudam pouco)
             lambda: self.provider.get_financials(ticker)
         )
 
     async def get_dividends(self, ticker: str):
+        ticker = format_ticker(ticker)
         return await self._get_with_cache(
             f"div_{ticker}", 86400,
             lambda: self.provider.get_dividends(ticker)
         )
 
     async def get_news(self, ticker: str):
+        ticker = format_ticker(ticker)
         return await self._get_with_cache(
             f"news_{ticker}", 1800,  # Cache 30 min
             lambda: self.provider.get_news(ticker)

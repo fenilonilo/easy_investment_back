@@ -13,6 +13,7 @@ class AssetRemove(BaseModel):
 class AssetQuote(Asset):
     price_usd: float
     direction: str  # "subindo", "caindo", "estável"
+    currency: Optional[str] = None  # ISO (USD, BRL...) da moeda em que price_usd está cotado
 
 class HistoryPoint(BaseModel):
     date: str

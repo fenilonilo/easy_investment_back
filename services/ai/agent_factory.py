@@ -5,12 +5,12 @@ from typing import Optional
 from agno.agent import Agent
 from agno.knowledge.knowledge import Knowledge
 from agno.models.base import Model
-from agno.tools.yfinance import YFinanceTools
+from agno.session.summary import SessionSummaryManager
 
 from core.config import AI_HISTORY_RUNS
 from infrastructure.ai.runtime import AIRuntime
 from services.ai.context import UserContext
-from services.ai.prompts import AGENT_NAME, DESCRIPTION, INSTRUCTIONS
+from services.ai.prompts import AGENT_NAME, DESCRIPTION, INSTRUCTIONS, SUMMARY_PROMPT
 from services.ai.tools import build_asset_tools, build_watchlist_tools
 from services.asset_service import AssetService
 
@@ -35,7 +35,6 @@ def build_agent(
         # Sem knowledge acessível não adianta oferecer a tool de busca.
         search_knowledge=knowledge is not None,
         tools=[
-            YFinanceTools(all=True),
             *build_asset_tools(asset_service),
             *build_watchlist_tools(user_ctx.id),
         ],
@@ -48,6 +47,12 @@ def build_agent(
         add_history_to_context=True,
         num_history_runs=AI_HISTORY_RUNS,
         enable_session_summaries=True,
+        # O resumo roda no mesmo `model` do agente, ou seja, no provider que de
+        # fato respondeu (o fallback reconstrói o agente). Se esse provider cair
+        # no meio, o resumo falha sem derrubar a resposta, que já foi entregue.
+        session_summary_manager=SessionSummaryManager(
+            model=model, session_summary_prompt=SUMMARY_PROMPT
+        ),
         add_session_summary_to_context=True,
         # Watchlist e perfil entram como dependências resolvidas por run, então
         # acompanham sozinhas qualquer alteração feita entre uma mensagem e outra.

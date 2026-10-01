@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, List, Optional
@@ -9,10 +10,11 @@ from uuid import uuid4
 
 from agno.db.base import SessionType
 from agno.run.agent import RunEvent
+from agno.run.base import RunStatus
 
 from core.config import LOG_MESSAGE_PREVIEW_CHARS
 from core.logging_config import describe_exception, get_request_id
-from infrastructure.ai.model_router import ModelProvider
+from infrastructure.ai.model_router import ModelProvider, is_availability_error
 from infrastructure.ai.runtime import AIRuntime
 from services.ai.agent_factory import build_agent
 from services.ai.context import UserContext
@@ -39,8 +41,44 @@ class SessionNotFound(Exception):
     """
 
 
+# Tools que gravam no banco: depois que uma delas roda, repetir a run em outro
+# modelo poderia executar a escrita duas vezes.
+_TOOLS_COM_EFEITO = {"adicionar_a_watchlist", "remover_da_watchlist"}
+
+MSG_INDISPONIVEL = "Serviço de IA temporariamente indisponível, tente novamente."
+MSG_COTA = "Limite de uso do serviço de IA atingido no momento, tente novamente em instantes."
+MSG_GENERICA = "Não foi possível gerar a resposta agora, tente novamente."
+MSG_SEM_DETALHE = "O modelo interrompeu a geração sem informar o motivo."
+
+
+def mensagem_usuario(exc: BaseException) -> str:
+    """Texto seguro para o app; o erro cru do provider fica só no log."""
+    if not is_availability_error(exc):
+        return MSG_GENERICA
+    texto = describe_exception(exc).lower()
+    if any(m in texto for m in ("429", "quota", "resource_exhausted", "rate limit")):
+        return MSG_COTA
+    return MSG_INDISPONIVEL
+
+
 class AgentUnavailable(Exception):
-    """Nenhum provider de IA conseguiu responder."""
+    """Nenhum provider de IA conseguiu responder.
+
+    `str()` é a mensagem para o usuário; o erro técnico fica em `.raw`.
+    """
+
+    def __init__(self, mensagem: str, raw: Optional[str] = None):
+        super().__init__(mensagem)
+        self.raw = raw or mensagem
+
+
+def _indisponivel(exc: BaseException) -> AgentUnavailable:
+    return AgentUnavailable(mensagem_usuario(exc), describe_exception(exc))
+
+
+# O Agno injeta perfil/watchlist na mensagem do usuário; isso é para o modelo, não
+# para o histórico que o app exibe.
+_CONTEXTO_INJETADO = re.compile(r"\s*<additional context>.*?</additional context>", re.DOTALL)
 
 
 @dataclass
@@ -131,10 +169,13 @@ class AIChatService:
         session = await self._get_owned_session(session_id, user_id)
         mensagens = []
         for message in session.get_chat_history() or []:
+            conteudo = getattr(message, "content", None)
+            if isinstance(conteudo, str):
+                conteudo = _CONTEXTO_INJETADO.sub("", conteudo)
             mensagens.append(
                 {
                     "role": getattr(message, "role", None),
-                    "content": getattr(message, "content", None),
+                    "content": conteudo,
                     "created_at": getattr(message, "created_at", None),
                 }
             )
@@ -174,6 +215,24 @@ class AIChatService:
             knowledge=await self.runtime.get_knowledge(),
         )
 
+    @staticmethod
+    async def _arun(agent, message: str, session_id: str, user_ctx: UserContext):
+        """`arun` sem stream não levanta quando o modelo falha: o Agno devolve um
+        RunOutput com status ERROR e o texto do erro em `content`. Sem converter,
+        o app recebe 200 com o JSON do provider como se fosse a resposta.
+        """
+        run_output = await agent.arun(
+            message, session_id=session_id, user_id=user_ctx.user_id
+        )
+        if getattr(run_output, "status", None) == RunStatus.error:
+            texto = str(getattr(run_output, "content", "") or "") or MSG_SEM_DETALHE
+            logger.error("chat: run terminou com status ERROR | motivo=%s", texto)
+            if _TOOLS_COM_EFEITO.intersection(_tool_names(run_output)):
+                # Uma escrita já rodou: não dá para repetir em outro modelo.
+                raise AgentUnavailable(MSG_GENERICA, texto)
+            raise RuntimeError(texto)
+        return run_output
+
     async def chat(
         self, user_ctx: UserContext, message: str, session_id: Optional[str] = None
     ) -> ChatResult:
@@ -196,9 +255,9 @@ class AIChatService:
 
         try:
             agent = await self._build_agent(provider, user_ctx, session_id)
-            run_output = await agent.arun(
-                message, session_id=session_id, user_id=user_ctx.user_id
-            )
+            run_output = await self._arun(agent, message, session_id, user_ctx)
+        except AgentUnavailable:
+            raise
         except Exception as exc:
             # exception() antes de qualquer coisa: o traceback original é a
             # única pista real, e AgentUnavailable(str(exc)) o descartaria.
@@ -210,14 +269,14 @@ class AIChatService:
             )
             fallback = await self.runtime.model_router.fallback_for(provider, exc)
             if fallback is None:
-                raise AgentUnavailable(describe_exception(exc)) from exc
+                raise _indisponivel(exc) from exc
 
             provider = fallback
             agent = await self._build_agent(provider, user_ctx, session_id)
             try:
-                run_output = await agent.arun(
-                    message, session_id=session_id, user_id=user_ctx.user_id
-                )
+                run_output = await self._arun(agent, message, session_id, user_ctx)
+            except AgentUnavailable:
+                raise
             except Exception as fallback_exc:
                 logger.exception(
                     "chat: fallback %s TAMBÉM falhou | session=%s | erro=%s",
@@ -225,9 +284,7 @@ class AIChatService:
                     session_id,
                     describe_exception(fallback_exc),
                 )
-                raise AgentUnavailable(
-                    describe_exception(fallback_exc)
-                ) from fallback_exc
+                raise _indisponivel(fallback_exc) from fallback_exc
 
         tools = _tool_names(run_output)
         conteudo = run_output.get_content_as_string()
@@ -263,10 +320,13 @@ class AIChatService:
     ) -> AsyncIterator[str]:
         """Frames SSE: `start`, `token`, `tool`, `done` e `error`.
 
-        A troca de provider só acontece antes do primeiro evento. Depois que o
-        primeiro token saiu, recomeçar em outro modelo faria o cliente receber
-        duas respostas concatenadas — então uma falha no meio vira um frame
-        `error` e o stream fecha.
+        Os eventos ficam em buffer até a "decisão": o primeiro token ou uma tool
+        com efeito colateral. Falha antes disso (exceção OU evento `run_error`,
+        que é como o Agno reporta 503/429 com stream_events=True) troca de
+        provider e recomeça, e o `start` sai uma vez só, com o provider final.
+        Depois da decisão, recomeçar faria o cliente receber duas respostas
+        concatenadas — então uma falha vira um frame `error` e o stream fecha,
+        sem `done` (que pareceria uma resposta vazia bem-sucedida).
         """
         if session_id:
             await self.assert_can_use_session(session_id, user_ctx.user_id)
@@ -274,7 +334,6 @@ class AIChatService:
             session_id = str(uuid4())
 
         provider = await self.runtime.model_router.pick()
-        agent = await self._build_agent(provider, user_ctx, session_id)
         request_id = get_request_id()
         inicio = time.perf_counter()
 
@@ -286,106 +345,117 @@ class AIChatService:
             _preview(message),
         )
 
-        primeiro_evento = None
-        iterador = None
-        try:
-            # Sem await: com stream=True o arun devolve um async generator,
-            # não uma coroutine. Awaitar levanta TypeError.
-            iterador = agent.arun(
-                message,
-                session_id=session_id,
-                user_id=user_ctx.user_id,
-                stream=True,
-                stream_events=True,
-            ).__aiter__()
-            primeiro_evento = await iterador.__anext__()
-        except StopAsyncIteration:
-            logger.warning(
-                "stream: %s abriu e fechou sem emitir nenhum evento | session=%s",
-                provider.value,
-                session_id,
-            )
-            iterador = None
-        except Exception as exc:
-            logger.exception(
-                "stream: provider %s falhou antes do primeiro token | session=%s | erro=%s",
-                provider.value,
-                session_id,
-                describe_exception(exc),
-            )
-            fallback = await self.runtime.model_router.fallback_for(provider, exc)
-            if fallback is None:
-                yield self._frame_erro(exc, session_id, request_id)
-                return
-            provider = fallback
+        trocou = False
+        while True:
             agent = await self._build_agent(provider, user_ctx, session_id)
+            buffer: List[Any] = []
+            partes: List[str] = []
+            tools_vistas: List[str] = []
+            decidido = False
+            erro_no_meio: Optional[str] = None
+            falha_previa: Optional[BaseException] = None
+
             try:
-                iterador = agent.arun(
+                # Sem await: com stream=True o arun devolve um async generator,
+                # não uma coroutine. Awaitar levanta TypeError.
+                async for evento in agent.arun(
                     message,
                     session_id=session_id,
                     user_id=user_ctx.user_id,
                     stream=True,
                     stream_events=True,
-                ).__aiter__()
-                primeiro_evento = await iterador.__anext__()
-                logger.info(
-                    "stream: fallback para %s deu certo | session=%s",
-                    provider.value,
-                    session_id,
-                )
-            except StopAsyncIteration:
-                iterador = None
-            except Exception as fallback_exc:
-                logger.exception(
-                    "stream: fallback %s TAMBÉM falhou | session=%s | erro=%s",
-                    provider.value,
-                    session_id,
-                    describe_exception(fallback_exc),
-                )
-                yield self._frame_erro(fallback_exc, session_id, request_id)
-                return
-
-        yield _sse(
-            "start",
-            {
-                "session_id": session_id,
-                "provider": provider.value,
-                "model": getattr(agent.model, "id", ""),
-            },
-        )
-
-        partes: List[str] = []
-        tools_vistas: List[str] = []
-        erro_no_meio: Optional[str] = None
-        try:
-            if primeiro_evento is not None:
-                for frame in _frames_do_evento(primeiro_evento, partes, tools_vistas):
-                    yield frame
-            if iterador is not None:
-                async for evento in iterador:
-                    if getattr(evento, "event", None) == RunEvent.run_error.value:
-                        erro_no_meio = str(getattr(evento, "content", "") or "")
+                ):
+                    nome = getattr(evento, "event", None)
+                    if nome == RunEvent.run_error.value:
+                        texto = str(getattr(evento, "content", "") or "")
+                        if not decidido:
+                            logger.error(
+                                "stream: provider %s falhou antes do primeiro token "
+                                "(run_error) | session=%s | motivo=%s",
+                                provider.value,
+                                session_id,
+                                texto or "sem detalhe do provider",
+                            )
+                            falha_previa = RuntimeError(texto or MSG_SEM_DETALHE)
+                            break
+                        erro_no_meio = texto or MSG_SEM_DETALHE
                         logger.error(
                             "stream: o modelo %s abortou no meio da geração | "
                             "session=%s | %s chars já emitidos | motivo=%s",
                             getattr(agent.model, "id", "?"),
                             session_id,
                             len("".join(partes)),
-                            erro_no_meio or "sem detalhe do provider",
+                            erro_no_meio,
                         )
-                    for frame in _frames_do_evento(evento, partes, tools_vistas):
-                        yield frame
-        except Exception as exc:
-            logger.exception(
-                "stream: falha DURANTE a geração | session=%s provider=%s | "
-                "%s chars já emitidos | erro=%s",
-                session_id,
+                        yield self._frame_erro(
+                            RuntimeError(erro_no_meio), session_id, request_id
+                        )
+                        continue
+
+                    if decidido:
+                        for frame in _frames_do_evento(evento, partes, tools_vistas):
+                            yield frame
+                        continue
+
+                    buffer.append(evento)
+                    if _decide(evento):
+                        decidido = True
+                        yield self._start(session_id, provider, agent)
+                        for ev in buffer:
+                            for frame in _frames_do_evento(ev, partes, tools_vistas):
+                                yield frame
+                        buffer = []
+            except Exception as exc:
+                if decidido:
+                    logger.exception(
+                        "stream: falha DURANTE a geração | session=%s provider=%s | "
+                        "%s chars já emitidos | erro=%s",
+                        session_id,
+                        provider.value,
+                        len("".join(partes)),
+                        describe_exception(exc),
+                    )
+                    yield self._frame_erro(exc, session_id, request_id)
+                    return
+                logger.exception(
+                    "stream: provider %s falhou antes do primeiro token | session=%s | erro=%s",
+                    provider.value,
+                    session_id,
+                    describe_exception(exc),
+                )
+                falha_previa = exc
+
+            if falha_previa is not None:
+                fallback = (
+                    None
+                    if trocou
+                    else await self.runtime.model_router.fallback_for(
+                        provider, falha_previa
+                    )
+                )
+                if fallback is None:
+                    yield self._frame_erro(falha_previa, session_id, request_id)
+                    return
+                provider, trocou = fallback, True
+                continue
+
+            break
+
+        if not decidido:
+            # Run vazia (ou só eventos de controle): ainda abre e fecha o stream.
+            logger.warning(
+                "stream: %s terminou sem token nem tool | session=%s",
                 provider.value,
-                len("".join(partes)),
-                describe_exception(exc),
+                session_id,
             )
-            yield self._frame_erro(exc, session_id, request_id)
-            return
+            yield self._start(session_id, provider, agent)
+            for ev in buffer:
+                for frame in _frames_do_evento(ev, partes, tools_vistas):
+                    yield frame
+        elif trocou:
+            logger.info(
+                "stream: fallback para %s deu certo | session=%s", provider.value, session_id
+            )
 
         conteudo = "".join(partes)
         duracao = (time.perf_counter() - inicio) * 1000
@@ -396,16 +466,16 @@ class AIChatService:
                 duracao,
                 len(conteudo),
             )
-        else:
-            logger.info(
-                "stream concluído | session=%s provider=%s em %.0fms | %s chars | tools=%s",
-                session_id,
-                provider.value,
-                duracao,
-                len(conteudo),
-                tools_vistas or "nenhuma",
-            )
-        if not conteudo.strip() and not erro_no_meio:
+            return  # o frame `error` já saiu; `done` pareceria sucesso
+        logger.info(
+            "stream concluído | session=%s provider=%s em %.0fms | %s chars | tools=%s",
+            session_id,
+            provider.value,
+            duracao,
+            len(conteudo),
+            tools_vistas or "nenhuma",
+        )
+        if not conteudo.strip():
             logger.warning(
                 "stream: nenhum token gerado pelo modelo %s | session=%s | o app vai "
                 "receber uma resposta vazia; verifique filtro de segurança do provider",
@@ -424,6 +494,17 @@ class AIChatService:
         )
 
     @staticmethod
+    def _start(session_id: str, provider: ModelProvider, agent) -> str:
+        return _sse(
+            "start",
+            {
+                "session_id": session_id,
+                "provider": provider.value,
+                "model": getattr(agent.model, "id", ""),
+            },
+        )
+
+    @staticmethod
     def _frame_erro(exc: BaseException, session_id: str, request_id: str) -> str:
         """Frame de erro que o app consegue reportar e a gente consegue achar.
 
@@ -433,7 +514,7 @@ class AIChatService:
         return _sse(
             "error",
             {
-                "detail": describe_exception(exc),
+                "detail": mensagem_usuario(exc),
                 "session_id": session_id,
                 "request_id": request_id,
             },
@@ -472,17 +553,16 @@ def _frames_do_evento(
         )
         return []
 
-    if nome == RunEvent.run_error.value:
-        # O log detalhado sai no chamador, que tem session_id e contexto.
-        return [
-            _sse(
-                "error",
-                {
-                    "detail": str(getattr(evento, "content", "") or "")
-                    or "O modelo interrompeu a geração sem informar o motivo.",
-                    "request_id": get_request_id(),
-                },
-            )
-        ]
-
     return []
+
+
+def _decide(evento: Any) -> bool:
+    """Evento a partir do qual não dá mais para trocar de provider."""
+    nome = getattr(evento, "event", None)
+    if nome == RunEvent.run_content.value:
+        conteudo = getattr(evento, "content", None)
+        return isinstance(conteudo, str) and bool(conteudo)
+    if nome == RunEvent.tool_call_started.value:
+        tool = getattr(evento, "tool", None)
+        return getattr(tool, "tool_name", None) in _TOOLS_COM_EFEITO
+    return False

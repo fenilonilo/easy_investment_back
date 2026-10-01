@@ -138,7 +138,6 @@ async def test_frame_de_erro_nunca_vem_com_detail_vazio(monkeypatch):
     _, dados = parse((await coletar(servico.stream(USER, "oi")))[0])
 
     assert dados["detail"].strip()
-    assert "ErroMudo" in dados["detail"]
 
 
 async def test_run_error_sem_conteudo_ganha_mensagem_padrao(monkeypatch):

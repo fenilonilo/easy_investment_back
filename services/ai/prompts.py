@@ -54,3 +54,12 @@ INSTRUCTIONS = [
     "Encerre respostas que analisem um ativo específico com uma linha curta "
     "lembrando que é conteúdo educacional, não recomendação de investimento.",
 ]
+
+
+# O prompt padrão do Agno é em inglês, e o resumo voltava em inglês no app.
+SUMMARY_PROMPT = """\
+Analise a conversa a seguir entre um usuário e um assistente e extraia, em português do Brasil:
+- summary (str): resumo conciso da sessão, com as informações importantes para futuras interações.
+- topics (lista opcional de str): os assuntos discutidos.
+Seja direto e inclua apenas o que for relevante.
+"""

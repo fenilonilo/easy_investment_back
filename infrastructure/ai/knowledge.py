@@ -22,6 +22,7 @@ from agno.vectordb.pgvector import PgVector, SearchType
 from core.config import (
     AI_DATABASE_URL,
     AI_DB_SCHEMA,
+    AI_KNOWLEDGE_MAX_RESULTS,
     AI_VECTOR_TABLE,
     GEMINI_EMBEDDER_DIMENSIONS,
     GEMINI_EMBEDDER_ID,
@@ -76,4 +77,5 @@ def build_knowledge(contents_db: BaseDb | AsyncBaseDb | None = None) -> Knowledg
         description=KNOWLEDGE_DESCRIPTION,
         vector_db=build_vector_db(),
         contents_db=contents_db,
+        max_results=AI_KNOWLEDGE_MAX_RESULTS,
     )
